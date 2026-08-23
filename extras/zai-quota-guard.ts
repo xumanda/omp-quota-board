@@ -5,6 +5,14 @@ import { fetchGlm, fmtDuration, fmtLocal, type GlmState } from "./quota-board.ts
  * GLM quota policy layer (companion to quota-board.ts, which owns all quota
  * fetching and the status row — including the glm segment).
  *
+ * Origin: this hook predates the board — it was first written as a standalone
+ * guard for the author's primary model (GLM), and became an optional extra
+ * once the board took over data fetching. It is GLM-only on purpose: the gate
+ * intercepts subagent fan-out because fan-out burns the DEFAULT model's
+ * quota, which is GLM in this setup. For other providers, whether a fan-out
+ * bills them depends on your OMP model roles, so a generic blocker would
+ * guess wrong — see README "Why there is no codex / grok / go guard".
+ *
  * What this hook adds on top of the display:
  *  - warn toast when the 5h window crosses ZAI_QUOTA_WARN_PCT (default 75)
  *  - gate: subagent fan-out (task tool) requires confirmation once the 5h

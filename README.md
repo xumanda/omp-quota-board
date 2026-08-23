@@ -58,7 +58,10 @@ Every parenthesized duration is that window's reset countdown.
 
 ## Optional companion: GLM warn & gate (`extras/zai-quota-guard.ts`)
 
-If you use the GLM Coding Plan as your main workhorse, an optional policy hook reuses the board's data layer (shared cache, no extra z.ai requests) to add:
+> **Why GLM only?** This guard predates the board itself: it was originally built as a
+> standalone hook for the author's primary model (GLM), and was later demoted to an
+> optional extra once the board took over all quota fetching. It stays GLM-only on
+> purpose — see "Why there is no codex/grok/go guard" below.
 
 - a warn toast when the 5h window crosses `ZAI_QUOTA_WARN_PCT` (default 75)
 - a confirmation gate on subagent fan-out (`task` tool) at `ZAI_QUOTA_GATE_PCT` (default 90) — headless contexts are blocked with an instructive reason
@@ -72,6 +75,24 @@ curl -fsSL -o ~/.omp/agent/hooks/pre/zai-quota-guard.ts \
 ```
 
 `ZAI_QUOTA_GUARD=0` disables it.
+
+### Why there is no codex / grok / go guard
+
+The gate works by intercepting subagent fan-out (`task` tool calls), because fan-out
+burns the **default model's** quota — which is GLM in the author's setup. Whether a
+fan-out burns codex, grok, or go depends entirely on which provider your OMP model
+roles point at; a generic blocker would guess wrong and block work that isn't even
+billing that provider. Blocking real work based on a wrong assumption costs more than
+running out of quota, so the red light stays GLM-specific.
+
+For the other three providers the board is display-only today: watch the percentages
+climb, and when a window actually runs out the provider itself starts rejecting
+requests (codex/grok) or downgrades you to free models (OpenCode Go) — OMP surfaces
+that as a request error mid-task. There is no early warning for them yet.
+
+A generic yellow-light toast (per-provider warn thresholds, notification only, no
+interference) would be safe to add and doesn't require guessing model→provider
+routing — PRs welcome, or open an issue if you want it prioritized.
 
 ## Configuration
 
