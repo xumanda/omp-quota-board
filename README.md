@@ -1,6 +1,6 @@
 # omp-quota-board
 
-One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/anthropics/oh-my-pi) — shows **glm / codex / grok / opencode go** usage in a single line, refreshing automatically every turn.
+One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) — shows **glm / codex / grok / opencode go** usage in a single line, refreshing automatically every turn.
 
 ```
 glm 5h 8% (1h27m) wk 36% (2d18h) | codex wk 18% (4d12h) cr 3000 | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)
