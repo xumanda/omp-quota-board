@@ -30,6 +30,8 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/xumanda/omp-quota-boar
   -OutFile "$env:USERPROFILE\.omp\agent\hooks\pre\quota-board.ts"
 ```
 
+To pin a version instead of tracking `main`, substitute a [tag](https://github.com/xumanda/omp-quota-board/tags) (e.g. `.../refs/tags/v1.1.0/quota-board.ts`) for the URL above.
+
 Then **restart OMP** — hooks load at session start.
 
 ## Prerequisites
@@ -53,6 +55,23 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
 
 Every parenthesized duration is that window's reset countdown.
+
+## Optional companion: GLM warn & gate (`extras/zai-quota-guard.ts`)
+
+If you use the GLM Coding Plan as your main workhorse, an optional policy hook reuses the board's data layer (shared cache, no extra z.ai requests) to add:
+
+- a warn toast when the 5h window crosses `ZAI_QUOTA_WARN_PCT` (default 75)
+- a confirmation gate on subagent fan-out (`task` tool) at `ZAI_QUOTA_GATE_PCT` (default 90) — headless contexts are blocked with an instructive reason
+- a `/glm` command with the full report (level, 5h/weekly windows, web-search quota)
+
+Install alongside the board (same directory, it imports `./quota-board.ts`):
+
+```bash
+curl -fsSL -o ~/.omp/agent/hooks/pre/zai-quota-guard.ts \
+  https://raw.githubusercontent.com/xumanda/omp-quota-board/main/extras/zai-quota-guard.ts
+```
+
+`ZAI_QUOTA_GUARD=0` disables it.
 
 ## Configuration
 
