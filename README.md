@@ -3,7 +3,7 @@
 One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/anthropics/oh-my-pi) — shows **glm / codex / grok / opencode go** usage in a single line, refreshing automatically every turn.
 
 ```
-glm 5h 6% (reset 33m) wk 34% | codex wk 15% (reset 4d17h) cr 3000 | grok wk 7% (reset 4d2h) | go 5h 33% (reset 1h00m) wk 17% mo 8%
+glm 5h 8% (1h27m) wk 36% (2d18h) | codex wk 18% (4d12h) cr 3000 | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)
 ```
 
 - **Single file, zero dependencies** — one TypeScript hook; OMP runs it on its bundled Bun runtime (`bun:sqlite` + `fetch`, nothing to install).
@@ -47,10 +47,12 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 
 | Example | Meaning |
 |---|---|
-| `glm 5h 6% (reset 33m) wk 34%` | GLM rolling 5h window 6% used (resets in 33m), weekly window 34% |
-| `codex wk 15% (reset 4d17h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 15% used, plus remaining credits |
-| `grok wk 7% (reset 4d2h)` | SuperGrok weekly credits 7% used |
-| `go 5h 33% (reset 1h00m) wk 17% mo 8%` | OpenCode Go rolling / weekly / monthly windows |
+| `glm 5h 8% (1h27m) wk 36% (2d18h)` | GLM rolling 5h window 8% used, resets in 1h27m; weekly window 36%, resets in 2d18h |
+| `codex wk 18% (4d12h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 18% used, resets in 4d12h; plus remaining credits |
+| `grok wk 10% (3d22h)` | SuperGrok weekly credits 10% used, resets in 3d22h |
+| `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
+
+Every parenthesized duration is that window's reset countdown.
 
 ## Configuration
 

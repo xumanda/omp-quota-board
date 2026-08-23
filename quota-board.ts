@@ -7,8 +7,9 @@ import { join } from "node:path";
  * omp-quota-board — one-row quota status bar for Oh My Pi (OMP).
  *
  * Renders a single status key ("quota-board") so the bar stays one row:
- *   glm 5h 4% (reset 1h02m) wk 33% | codex wk 15% (reset 4d17h) cr 3000 |
- *   grok wk 7% (reset 4d3h) | go 5h 33% (reset 1h28m) wk 17% mo 8%
+ *   glm 5h 4% (1h02m) wk 33% (26h) | codex wk 15% (4d17h) cr 3000 |
+ *   grok wk 7% (4d3h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d)
+ * Parenthesized durations are reset countdowns for each window.
  * Providers without credentials are silently skipped.
  *
  * Quota sources (read-only GETs, same endpoints the providers' own consoles
@@ -181,8 +182,14 @@ export async function fetchGlm(
 
 export function glmText(s: GlmState): string | undefined {
   if (!s.fiveHour) return undefined;
-  let text = `glm 5h ${s.fiveHour.pct ?? "?"}% (reset ${fmtDuration(s.fiveHour.resetMs - Date.now())})`;
-  if (s.weekly?.pct !== undefined) text += ` wk ${s.weekly.pct}%`;
+  let text = `glm 5h ${s.fiveHour.pct ?? "?"}%`;
+  if (s.fiveHour.resetMs > 0)
+    text += ` (${fmtDuration(s.fiveHour.resetMs - Date.now())})`;
+  if (s.weekly?.pct !== undefined) {
+    text += ` wk ${s.weekly.pct}%`;
+    if (s.weekly.resetMs > 0)
+      text += ` (${fmtDuration(s.weekly.resetMs - Date.now())})`;
+  }
   return text;
 }
 
@@ -259,11 +266,15 @@ export function codexText(s: CodexState): string | undefined {
   const w = s.primary ?? s.secondary;
   if (w) {
     let text = `codex ${w.label} ${w.pct}%`;
-    if (w.resetMs > 0) text += ` (reset ${fmtDuration(w.resetMs - Date.now())})`;
+    if (w.resetMs > 0) text += ` (${fmtDuration(w.resetMs - Date.now())})`;
     parts.push(text);
   }
   const other = s.primary && s.secondary ? s.secondary : undefined;
-  if (other) parts.push(`${other.label} ${other.pct}%`);
+  if (other) {
+    let text = `${other.label} ${other.pct}%`;
+    if (other.resetMs > 0) text += ` (${fmtDuration(other.resetMs - Date.now())})`;
+    parts.push(text);
+  }
   if (parts.length === 0) return undefined;
   if (s.creditsBalance) parts.push(`cr ${s.creditsBalance}`);
   return parts.join(" ");
@@ -328,7 +339,7 @@ export async function fetchGrok(
 
 export function grokText(s: GrokState): string {
   let text = `grok ${s.label} ${s.pct}%`;
-  if (s.resetMs > 0) text += ` (reset ${fmtDuration(s.resetMs - Date.now())})`;
+  if (s.resetMs > 0) text += ` (${fmtDuration(s.resetMs - Date.now())})`;
   return text;
 }
 
@@ -336,8 +347,8 @@ export function grokText(s: GrokState): string {
 
 interface OcgoState {
   rolling?: Win;
-  weeklyPct?: number;
-  monthlyPct?: number;
+  weekly?: Win;
+  monthly?: Win;
   fetchedAt: number;
 }
 
@@ -375,8 +386,8 @@ export async function fetchOcgo(
     if (!usage) throw new Error("unexpected usage response shape");
     ocgoCache = {
       rolling: parseOcgoWindow(usage.rolling),
-      weeklyPct: parseOcgoWindow(usage.weekly)?.pct,
-      monthlyPct: parseOcgoWindow(usage.monthly)?.pct,
+      weekly: parseOcgoWindow(usage.weekly),
+      monthly: parseOcgoWindow(usage.monthly),
       fetchedAt: Date.now(),
     };
   } catch (err) {
@@ -386,17 +397,23 @@ export async function fetchOcgo(
 }
 
 export function ocgoText(s: OcgoState): string | undefined {
-  if (!s.rolling && s.weeklyPct === undefined && s.monthlyPct === undefined)
-    return undefined;
+  if (!s.rolling && !s.weekly && !s.monthly) return undefined;
   const parts: string[] = [];
   if (s.rolling) {
     let text = `go 5h ${s.rolling.pct}%`;
     if (s.rolling.resetMs > 0)
-      text += ` (reset ${fmtDuration(s.rolling.resetMs - Date.now())})`;
+      text += ` (${fmtDuration(s.rolling.resetMs - Date.now())})`;
     parts.push(text);
   }
-  if (s.weeklyPct !== undefined) parts.push(`wk ${s.weeklyPct}%`);
-  if (s.monthlyPct !== undefined) parts.push(`mo ${s.monthlyPct}%`);
+  for (const [label, win] of [
+    ["wk", s.weekly],
+    ["mo", s.monthly],
+  ] as const) {
+    if (!win) continue;
+    let text = `${label} ${win.pct}%`;
+    if (win.resetMs > 0) text += ` (${fmtDuration(win.resetMs - Date.now())})`;
+    parts.push(text);
+  }
   return parts.join(" ");
 }
 
@@ -487,8 +504,8 @@ export default function quotaBoard(pi: HookAPI): void {
                   ? ` (resets ${fmtLocal(ocgo.rolling.resetMs)})`
                   : ""),
             );
-          if (ocgo.weeklyPct !== undefined) bits.push(`wk ${ocgo.weeklyPct}%`);
-          if (ocgo.monthlyPct !== undefined) bits.push(`mo ${ocgo.monthlyPct}%`);
+          if (ocgo.weekly) bits.push(`wk ${ocgo.weekly.pct}%`);
+          if (ocgo.monthly) bits.push(`mo ${ocgo.monthly.pct}%`);
           lines.push(`  go   : ${bits.join(" | ") || "no windows"}`);
         } else {
           lines.push("  go   : unavailable (no api key or fetch failed)");
