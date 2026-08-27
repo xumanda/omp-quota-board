@@ -317,11 +317,23 @@ export async function fetchGrok(
       "x-grok-client-version": "1.0.0",
     });
     const config = data.config as Record<string, unknown> | undefined;
-    const pct = config?.creditUsagePercent;
-    if (typeof pct !== "number" || !Number.isFinite(pct))
-      throw new Error("unexpected billing response shape");
     const period = config?.currentPeriod as Record<string, unknown> | undefined;
     const type = typeof period?.type === "string" ? period.type : "";
+    // Proto3 JSON omits zero-valued fields: an absent creditUsagePercent
+    // with a current period means 0% used, not a malformed response (seen
+    // 2026-08-27 right after a period reset; same call as upstream
+    // opencode-quota src/lib/xai.ts parseCreditsWindow).
+    const hasUsage =
+      config !== undefined && Object.hasOwn(config, "creditUsagePercent");
+    const hasPeriod =
+      type !== "" ||
+      typeof period?.start === "string" ||
+      typeof period?.end === "string";
+    const pct = hasUsage ? config?.creditUsagePercent : 0;
+    if (!hasPeriod && !hasUsage)
+      throw new Error("unexpected billing response shape");
+    if (typeof pct !== "number" || !Number.isFinite(pct))
+      throw new Error("unexpected billing response shape");
     const label =
       GROK_PERIOD_LABELS.find(([needle]) => type.includes(needle))?.[1] ?? "p";
     const resetMs = typeof period?.end === "string" ? Date.parse(period.end) : 0;
