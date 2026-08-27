@@ -30,7 +30,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/xumanda/omp-quota-boar
   -OutFile "$env:USERPROFILE\.omp\agent\hooks\pre\quota-board.ts"
 ```
 
-To pin a version instead of tracking `main`, substitute a [tag](https://github.com/xumanda/omp-quota-board/tags) (e.g. `.../refs/tags/v1.1.0/quota-board.ts`) for the URL above.
+To pin a version instead of tracking `main`, substitute a [tag](https://github.com/xumanda/omp-quota-board/tags) (e.g. `.../refs/tags/v1.1.1/quota-board.ts`) for the URL above.
 
 Then **restart OMP** — hooks load at session start.
 
