@@ -225,6 +225,11 @@ function parseCodexWindow(raw: unknown): (Win & { label: string }) | undefined {
   return { pct: Math.round(pct), resetMs, label };
 }
 
+function fmtCredits(balance: string): string {
+  const n = Number.parseFloat(balance);
+  return Number.isFinite(n) ? String(Math.floor(n)) : balance;
+}
+
 export async function fetchCodex(
   force: boolean,
   log?: (...args: unknown[]) => void,
@@ -276,7 +281,7 @@ export function codexText(s: CodexState): string | undefined {
     parts.push(text);
   }
   if (parts.length === 0) return undefined;
-  if (s.creditsBalance) parts.push(`cr ${s.creditsBalance}`);
+  if (s.creditsBalance) parts.push(`cr ${fmtCredits(s.creditsBalance)}`);
   return parts.join(" ");
 }
 
@@ -494,7 +499,7 @@ export default function quotaBoard(pi: HookAPI): void {
               (codex.secondary
                 ? ` | ${codex.secondary.label} ${codex.secondary.pct}%`
                 : "") +
-              (codex.creditsBalance ? ` | credits ${codex.creditsBalance}` : ""),
+              (codex.creditsBalance ? ` | credits ${fmtCredits(codex.creditsBalance)}` : ""),
           );
         } else {
           lines.push("  codex: unavailable (no token in agent.db or fetch failed)");
