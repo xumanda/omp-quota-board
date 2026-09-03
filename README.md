@@ -1,9 +1,9 @@
 # omp-quota-board
 
-One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) — shows **glm / codex / grok / opencode go** usage in a single line, refreshing automatically every turn.
+One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) — shows **glm / codex / grok / opencode go / google antigravity** usage in a single line, refreshing automatically every turn.
 
 ```
-glm 5h 8% (1h27m) wk 36% (2d18h) | codex wk 18% (4d12h) cr 3000 | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)
+glm 5h 8% (1h27m) wk 36% (2d18h) | codex wk 18% (4d12h) cr 3000 | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h) | goog 5h 1% (2h41m) wk 4% (5d20h)
 ```
 
 - **Single file, zero dependencies** — one TypeScript hook; OMP runs it on its bundled Bun runtime (`bun:sqlite` + `fetch`, nothing to install).
@@ -44,6 +44,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | `codex` | ChatGPT Plus/Pro (Codex) | `openai-codex` (OAuth) | — |
 | `grok` | xAI SuperGrok | `xai-oauth` (OAuth) | — |
 | `go` | OpenCode Go plan | `opencode-go` (api key) | `OPENCODE_API_KEY` |
+| `goog` | Google Antigravity (Gemini / Claude / GPT models) | `google-antigravity` (OAuth) | — |
 
 ## Reading the bar
 
@@ -53,6 +54,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | `codex wk 18% (4d12h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 18% used, resets in 4d12h; plus remaining credits |
 | `grok wk 10% (3d22h)` | SuperGrok weekly credits 10% used, resets in 3d22h |
 | `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
+| `goog 5h 1% (2h41m) wk 4% (5d20h)` | Google Antigravity 5h / weekly windows; the bar shows the tighter of its two pools (Gemini vs Claude/GPT), `/quota` lists both |
 
 Every parenthesized duration is that window's reset countdown.
 

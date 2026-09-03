@@ -8,7 +8,8 @@ import { join } from "node:path";
  *
  * Renders a single status key ("quota-board") so the bar stays one row:
  *   glm 5h 4% (1h02m) wk 33% (26h) | codex wk 15% (4d17h) cr 3000 |
- *   grok wk 7% (4d3h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d)
+ *   grok wk 7% (4d3h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d) |
+ *   goog 5h 0% (4h42m) wk 0% (6d23h)
  * Parenthesized durations are reset countdowns for each window.
  * Providers without credentials are silently skipped.
  *
@@ -20,6 +21,9 @@ import { join } from "node:path";
  *            18000=5h, 604800=wk, 2628000=mo)
  *   grok  : GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
  *   go    : GET https://opencode.ai/zen/go/v1/usage
+ *   goog  : POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
+ *           (Antigravity; two pools — Gemini Models and Claude/GPT models —
+ *            each with weekly and 5h buckets of remainingFraction)
  *
  * Credentials are read at runtime from OMP's own store
  * (~/.omp/agent/agent.db, auth_credentials, disabled_cause IS NULL, newest
@@ -28,6 +32,7 @@ import { join } from "node:path";
  *   codex : agent.db 'openai-codex' oauth .access (+ .accountId header)
  *   grok  : agent.db 'xai-oauth' oauth .access
  *   go    : env OPENCODE_API_KEY, else agent.db 'opencode-go' api_key .key
+ *   goog  : agent.db 'google-antigravity' oauth .access (+ .projectId body)
  * OMP owns OAuth refresh; when a token expires this hook serves the last
  * known values until OMP rotates it.
  *
@@ -39,6 +44,8 @@ const GLM_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
 const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
 const GROK_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const OCGO_URL = "https://opencode.ai/zen/go/v1/usage";
+const AGY_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const AGY_UA = "antigravity/cli/1.0.3 darwin/amd64";
 
 const TTL_MS = (() => {
   const v = Number(process.env.QUOTA_BOARD_TTL_MS);
@@ -107,8 +114,11 @@ function readCredential(
 async function fetchJson(
   url: string,
   headers: Record<string, string>,
+  init?: { method?: string; body?: string },
 ): Promise<Record<string, unknown>> {
   const res = await fetch(url, {
+    method: init?.method ?? "GET",
+    body: init?.body,
     headers: { Accept: "application/json", ...headers },
     signal: AbortSignal.timeout(20_000),
   });
@@ -434,6 +444,125 @@ export function ocgoText(s: OcgoState): string | undefined {
   return parts.join(" ");
 }
 
+// --- goog (Google Antigravity) ----------------------------------------------
+
+interface AgyPool {
+  fiveHour?: Win;
+  weekly?: Win;
+}
+
+export interface AgyState {
+  gemini: AgyPool;
+  thirdParty: AgyPool; // Claude and GPT models share a separate pool
+  fetchedAt: number;
+}
+
+let agyCache: AgyState | undefined;
+
+function parseAgyWindow(raw: unknown): Win | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const b = raw as Record<string, unknown>;
+  if (b.disabled === true) return undefined;
+  const fraction = b.remainingFraction;
+  if (typeof fraction !== "number" || !Number.isFinite(fraction)) return undefined;
+  const resetMs = typeof b.resetTime === "string" ? Date.parse(b.resetTime) : NaN;
+  return {
+    pct: Math.round((1 - Math.min(1, Math.max(0, fraction))) * 100),
+    resetMs: Number.isFinite(resetMs) ? resetMs : 0,
+  };
+}
+
+export async function fetchAgy(
+  force: boolean,
+  log?: (...args: unknown[]) => void,
+): Promise<AgyState | undefined> {
+  if (!ENABLED) return undefined;
+  if (!force && agyCache && Date.now() - agyCache.fetchedAt < TTL_MS)
+    return agyCache;
+  const access = readCredential("google-antigravity", "oauth", "access");
+  const projectId = readCredential("google-antigravity", "oauth", "projectId");
+  if (!access || !projectId) {
+    log?.(
+      "quota-board: no google-antigravity oauth access/projectId in agent.db; goog quota disabled",
+    );
+    return agyCache;
+  }
+  try {
+    const payload = await fetchJson(
+      AGY_URL,
+      {
+        Authorization: `Bearer ${access}`,
+        "User-Agent": AGY_UA,
+        "x-activity-request-id": crypto.randomUUID(),
+      },
+      { method: "POST", body: JSON.stringify({ project: projectId }) },
+    );
+    const groups = payload.groups;
+    if (!Array.isArray(groups)) throw new Error("unexpected response shape");
+    const state: AgyState = { gemini: {}, thirdParty: {}, fetchedAt: Date.now() };
+    for (const group of groups as Array<Record<string, unknown>>) {
+      const name =
+        typeof group.displayName === "string" ? group.displayName.toLowerCase() : "";
+      const pool = name.includes("gemini")
+        ? state.gemini
+        : name.includes("claude") || name.includes("gpt")
+          ? state.thirdParty
+          : undefined;
+      if (!pool || !Array.isArray(group.buckets)) continue;
+      for (const bucket of group.buckets as Array<Record<string, unknown>>) {
+        const win = parseAgyWindow(bucket);
+        if (!win) continue;
+        const kind =
+          typeof bucket.window === "string"
+            ? bucket.window.toUpperCase().replace(/[\s-]+/g, "_")
+            : "";
+        if (kind === "WEEKLY" && !pool.weekly) pool.weekly = win;
+        else if ((kind === "FIVE_HOUR" || kind === "5H") && !pool.fiveHour)
+          pool.fiveHour = win;
+      }
+    }
+    if (
+      !state.gemini.fiveHour &&
+      !state.gemini.weekly &&
+      !state.thirdParty.fiveHour &&
+      !state.thirdParty.weekly
+    )
+      throw new Error("no quota buckets parsed");
+    agyCache = state;
+  } catch (err) {
+    log?.(`quota-board: goog fetch failed: ${String(err)}`);
+  }
+  return agyCache; // stale on failure
+}
+
+function tighterWindow(a: Win | undefined, b: Win | undefined): Win | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return (b.pct ?? 0) > (a.pct ?? 0) ? b : a;
+}
+
+export function agyText(s: AgyState): string | undefined {
+  // Status bar shows the tighter of the two pools per window (early warning);
+  // /quota lists both pools in full.
+  const fiveHour = tighterWindow(s.gemini.fiveHour, s.thirdParty.fiveHour);
+  const weekly = tighterWindow(s.gemini.weekly, s.thirdParty.weekly);
+  if (!fiveHour && !weekly) return undefined;
+  const parts: string[] = [];
+  if (fiveHour) {
+    let text = `goog 5h ${fiveHour.pct}%`;
+    if (fiveHour.resetMs > 0)
+      text += ` (${fmtDuration(fiveHour.resetMs - Date.now())})`;
+    parts.push(text);
+  }
+  if (weekly) {
+    let text = `wk ${weekly.pct}%`;
+    if (weekly.resetMs > 0)
+      text += ` (${fmtDuration(weekly.resetMs - Date.now())})`;
+    parts.push(text);
+  }
+  return parts.join(" ");
+}
+
 // --- hook wiring -----------------------------------------------------------
 
 export default function quotaBoard(pi: HookAPI): void {
@@ -442,13 +571,14 @@ export default function quotaBoard(pi: HookAPI): void {
   const refreshStatus = async (ctx: {
     ui?: { setStatus?: (k: string, t: string) => void };
   }) => {
-    const [glm, codex, grok, ocgo] = await Promise.all([
+    const [glm, codex, grok, ocgo, agy] = await Promise.all([
       fetchGlm(false, log).then((s) => s && glmText(s)),
       fetchCodex(false, log).then((s) => s && codexText(s)),
       fetchGrok(false, log).then((s) => s && grokText(s)),
       fetchOcgo(false, log).then((s) => s && ocgoText(s)),
+      fetchAgy(false, log).then((s) => s && agyText(s)),
     ]);
-    const segments = [glm, codex, grok, ocgo].filter(
+    const segments = [glm, codex, grok, ocgo, agy].filter(
       (t): t is string => typeof t === "string",
     );
     if (segments.length > 0)
@@ -465,15 +595,18 @@ export default function quotaBoard(pi: HookAPI): void {
 
   try {
     pi.registerCommand("quota", {
-      description: "GLM / Codex / Grok / OpenCode Go quota report",
+      description: "GLM / Codex / Grok / OpenCode Go / Google Antigravity quota report",
       handler: async (_args, ctx) => {
-        const [glm, codex, grok, ocgo] = await Promise.all([
+        const [glm, codex, grok, ocgo, agy] = await Promise.all([
           fetchGlm(true, log),
           fetchCodex(true, log),
           fetchGrok(true, log),
           fetchOcgo(true, log),
+          fetchAgy(true, log),
         ]);
-        const lines: string[] = ["Quota board (glm / codex / grok / opencode go)"];
+        const lines: string[] = [
+          "Quota board (glm / codex / grok / opencode go / google antigravity)",
+        ];
         if (glm) {
           const bits: string[] = [];
           if (glm.fiveHour)
@@ -527,6 +660,36 @@ export default function quotaBoard(pi: HookAPI): void {
         } else {
           lines.push("  go   : unavailable (no api key or fetch failed)");
         }
+        if (agy) {
+          const bits: string[] = [];
+          for (const [pool, label] of [
+            [agy.gemini, "gemini"],
+            [agy.thirdParty, "claude/gpt"],
+          ] as const) {
+            const ws: string[] = [];
+            if (pool.fiveHour)
+              ws.push(
+                `5h ${pool.fiveHour.pct}%` +
+                  (pool.fiveHour.resetMs > 0
+                    ? ` (resets ${fmtLocal(pool.fiveHour.resetMs)})`
+                    : ""),
+              );
+            if (pool.weekly)
+              ws.push(
+                `wk ${pool.weekly.pct}%` +
+                  (pool.weekly.resetMs > 0
+                    ? ` (resets ${fmtLocal(pool.weekly.resetMs)})`
+                    : ""),
+              );
+            if (ws.length > 0) bits.push(`${label} ${ws.join(", ")}`);
+          }
+          lines.push(`  goog : ${bits.join(" | ") || "no windows"}`);
+        } else {
+          lines.push(
+            "  goog : unavailable (no oauth token in agent.db or fetch failed)",
+          );
+        }
+
         lines.push(
           `  knobs: ttl=${Math.round(TTL_MS / 1000)}s (QUOTA_BOARD_TTL_MS, QUOTA_BOARD)`,
         );
