@@ -7,10 +7,10 @@ import { join } from "node:path";
  * omp-quota-board — one-row quota status bar for Oh My Pi (OMP).
  *
  * Renders a single status key ("quota-board") so the bar stays one row:
- *   glm 5h 4% (1h02m) wk 33% (26h) | codex wk 15% (4d17h) cr 3000 |
+ *   glm 5h 4% (1h02m) wk 33% (26h) |
+ *   codex1 5h 0% (5h00m) wk 55% (2d22h) cr 2735 | codex2 wk 8% (6d) |
  *   grok wk 7% (4d3h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d) |
  *   goog 5h 0% (4h42m) wk 0% (6d23h)
- * Parenthesized durations are reset countdowns for each window.
  * Providers without credentials are silently skipped.
  *
  * Quota sources (read-only GETs, same endpoints the providers' own consoles
@@ -29,7 +29,9 @@ import { join } from "node:path";
  * (~/.omp/agent/agent.db, auth_credentials, disabled_cause IS NULL, newest
  * first) plus classic env fallbacks — this file stores no secrets:
  *   glm   : env ZAI_API_KEY | GLM_API_KEY, else agent.db 'zai' api_key .key
- *   codex : agent.db 'openai-codex' oauth .access (+ .accountId header)
+ *   codex : agent.db 'openai-codex' oauth rows (.access + .accountId header) —
+ *           every logged-in account gets its own segment: "codex" when there
+ *           is one, "codex1", "codex2", … by credential row id (oldest first)
  *   grok  : agent.db 'xai-oauth' oauth .access
  *   go    : env OPENCODE_API_KEY, else agent.db 'opencode-go' api_key .key
  *   goog  : agent.db 'google-antigravity' oauth .access (+ .projectId body)
@@ -213,7 +215,13 @@ interface CodexState {
   fetchedAt: number;
 }
 
-let codexCache: CodexState | undefined;
+export interface CodexAccount {
+  key: string; // agent.db credential row id — stable anchor for cache & order
+  email?: string;
+  state: CodexState;
+}
+
+let codexAccounts: CodexAccount[] | undefined;
 
 const CODEX_WINDOW_LABELS: Record<number, string> = {
   18000: "5h",
@@ -240,47 +248,112 @@ function fmtCredits(balance: string): string {
   return Number.isFinite(n) ? String(Math.floor(n)) : balance;
 }
 
+interface CodexCred {
+  key: string;
+  access: string;
+  accountId?: string;
+  email?: string;
+}
+
+/** All logged-in openai-codex oauth rows, oldest credential first. */
+function readCodexCreds(): CodexCred[] {
+  const creds: CodexCred[] = [];
+  try {
+    const db = new Database(join(homedir(), ".omp", "agent", "agent.db"), {
+      readonly: true,
+    });
+    try {
+      db.run("PRAGMA busy_timeout = 2000");
+      const rows = db
+        .query(
+          "SELECT id, data FROM auth_credentials WHERE provider='openai-codex' " +
+            "AND credential_type='oauth' AND disabled_cause IS NULL " +
+            "ORDER BY id ASC",
+        )
+        .all() as Array<{ id: number; data: string }>;
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.data) as Record<string, unknown>;
+          if (typeof parsed.access !== "string" || !parsed.access) continue;
+          creds.push({
+            key: String(row.id),
+            access: parsed.access,
+            accountId:
+              typeof parsed.accountId === "string" && parsed.accountId
+                ? parsed.accountId
+                : undefined,
+            email:
+              typeof parsed.email === "string" && parsed.email
+                ? parsed.email
+                : undefined,
+          });
+        } catch {
+          /* try next row */
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* fall through with whatever was parsed */
+  }
+  return creds;
+}
+
 export async function fetchCodex(
   force: boolean,
   log?: (...args: unknown[]) => void,
-): Promise<CodexState | undefined> {
+): Promise<CodexAccount[] | undefined> {
   if (!ENABLED) return undefined;
-  if (!force && codexCache && Date.now() - codexCache.fetchedAt < TTL_MS)
-    return codexCache;
-  const token = readCredential("openai-codex", "oauth", "access");
-  if (!token) {
+  const creds = readCodexCreds();
+  if (creds.length === 0) {
     log?.("quota-board: no openai-codex oauth token in agent.db; codex quota disabled");
-    return codexCache;
+    return codexAccounts;
   }
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "User-Agent": "omp-quota-board",
-  };
-  const accountId = readCredential("openai-codex", "oauth", "accountId");
-  if (accountId) headers["ChatGPT-Account-Id"] = accountId;
-  try {
-    const data = await fetchJson(CODEX_URL, headers);
-    const rl = data.rate_limit as Record<string, unknown> | null | undefined;
-    const credits = data.credits as Record<string, unknown> | null | undefined;
-    codexCache = {
-      plan: typeof data.plan_type === "string" ? data.plan_type : undefined,
-      primary: parseCodexWindow(rl?.primary_window),
-      secondary: parseCodexWindow(rl?.secondary_window),
-      creditsBalance:
-        credits && typeof credits.balance === "string" ? credits.balance : undefined,
-      fetchedAt: Date.now(),
-    };
-  } catch (err) {
-    log?.(`quota-board: codex fetch failed: ${String(err)}`);
-  }
-  return codexCache; // stale on failure
+  const entries = await Promise.all(
+    creds.map(async (cred): Promise<CodexAccount | undefined> => {
+      const prev = codexAccounts?.find((e) => e.key === cred.key);
+      if (!force && prev && Date.now() - prev.state.fetchedAt < TTL_MS) return prev;
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${cred.access}`,
+        "User-Agent": "omp-quota-board",
+      };
+      if (cred.accountId) headers["ChatGPT-Account-Id"] = cred.accountId;
+      try {
+        const data = await fetchJson(CODEX_URL, headers);
+        const rl = data.rate_limit as Record<string, unknown> | null | undefined;
+        const credits = data.credits as Record<string, unknown> | null | undefined;
+        return {
+          key: cred.key,
+          email: cred.email,
+          state: {
+            plan: typeof data.plan_type === "string" ? data.plan_type : undefined,
+            primary: parseCodexWindow(rl?.primary_window),
+            secondary: parseCodexWindow(rl?.secondary_window),
+            creditsBalance:
+              credits && typeof credits.balance === "string"
+                ? credits.balance
+                : undefined,
+            fetchedAt: Date.now(),
+          },
+        };
+      } catch (err) {
+        log?.(
+          `quota-board: codex(${cred.email ?? cred.key}) fetch failed: ${String(err)}`,
+        );
+        return prev; // stale on failure
+      }
+    }),
+  );
+  codexAccounts = entries.filter((e): e is CodexAccount => e !== undefined);
+  return codexAccounts;
 }
 
-export function codexText(s: CodexState): string | undefined {
+export function codexText(s: CodexState, label = "codex"): string | undefined {
   const parts: string[] = [];
   const w = s.primary ?? s.secondary;
   if (w) {
-    let text = `codex ${w.label} ${w.pct}%`;
+    let text = `${label} ${w.label} ${w.pct}%`;
     if (w.resetMs > 0) text += ` (${fmtDuration(w.resetMs - Date.now())})`;
     parts.push(text);
   }
@@ -571,14 +644,18 @@ export default function quotaBoard(pi: HookAPI): void {
   const refreshStatus = async (ctx: {
     ui?: { setStatus?: (k: string, t: string) => void };
   }) => {
-    const [glm, codex, grok, ocgo, agy] = await Promise.all([
+    const [glm, codexSegs, grok, ocgo, agy] = await Promise.all([
       fetchGlm(false, log).then((s) => s && glmText(s)),
-      fetchCodex(false, log).then((s) => s && codexText(s)),
+      fetchCodex(false, log).then((accs) =>
+        (accs ?? []).map((a, i) =>
+          codexText(a.state, (accs?.length ?? 0) > 1 ? `codex${i + 1}` : "codex"),
+        ),
+      ),
       fetchGrok(false, log).then((s) => s && grokText(s)),
       fetchOcgo(false, log).then((s) => s && ocgoText(s)),
       fetchAgy(false, log).then((s) => s && agyText(s)),
     ]);
-    const segments = [glm, codex, grok, ocgo, agy].filter(
+    const segments = [glm, ...codexSegs, grok, ocgo, agy].filter(
       (t): t is string => typeof t === "string",
     );
     if (segments.length > 0)
@@ -620,20 +697,25 @@ export default function quotaBoard(pi: HookAPI): void {
         } else {
           lines.push("  glm  : unavailable (no key or fetch failed)");
         }
-        if (codex) {
-          lines.push(
-            `  codex (${codex.plan ?? "?"}): ` +
-              (codex.primary
-                ? `${codex.primary.label} ${codex.primary.pct}%` +
-                  (codex.primary.resetMs > 0
-                    ? `, resets ${fmtLocal(codex.primary.resetMs)}`
-                    : "")
-                : "no window") +
-              (codex.secondary
-                ? ` | ${codex.secondary.label} ${codex.secondary.pct}%`
-                : "") +
-              (codex.creditsBalance ? ` | credits ${fmtCredits(codex.creditsBalance)}` : ""),
-          );
+        if (codex && codex.length > 0) {
+          codex.forEach((acc, i) => {
+            const label = codex.length > 1 ? `codex${i + 1}` : "codex";
+            const s = acc.state;
+            const who = acc.email ? ` <${acc.email}>` : "";
+            lines.push(
+              `  ${label} (${s.plan ?? "?"})${who}: ` +
+                (s.primary
+                  ? `${s.primary.label} ${s.primary.pct}%` +
+                    (s.primary.resetMs > 0
+                      ? `, resets ${fmtLocal(s.primary.resetMs)}`
+                      : "")
+                  : "no window") +
+                (s.secondary
+                  ? ` | ${s.secondary.label} ${s.secondary.pct}%`
+                  : "") +
+                (s.creditsBalance ? ` | credits ${fmtCredits(s.creditsBalance)}` : ""),
+            );
+          });
         } else {
           lines.push("  codex: unavailable (no token in agent.db or fetch failed)");
         }

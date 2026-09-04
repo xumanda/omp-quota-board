@@ -2,8 +2,8 @@
 
 One-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) — shows **glm / codex / grok / opencode go / google antigravity** usage in a single line, refreshing automatically every turn.
 
-```
-glm 5h 8% (1h27m) wk 36% (2d18h) | codex wk 18% (4d12h) cr 3000 | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h) | goog 5h 1% (2h41m) wk 4% (5d20h)
+```text
+glm 5h 8% (1h27m) wk 36% (2d18h) | codex1 5h 0% (5h00m) wk 55% (2d22h) cr 2735 | codex2 wk 0% (7d) | grok wk 10% (3d22h) | go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h) | goog 5h 1% (2h41m) wk 4% (5d20h)
 ```
 
 - **Single file, zero dependencies** — one TypeScript hook; OMP runs it on its bundled Bun runtime (`bun:sqlite` + `fetch`, nothing to install).
@@ -41,7 +41,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | Segment | Subscription | OMP credential (`provider` in agent.db) | Fallback env |
 |---|---|---|---|
 | `glm` | z.ai GLM Coding Plan | `zai` (api key) | `ZAI_API_KEY` / `GLM_API_KEY` |
-| `codex` | ChatGPT Plus/Pro (Codex) | `openai-codex` (OAuth) | — |
+| `codex` | ChatGPT Plus/Pro (Codex) | `openai-codex` (OAuth) — one segment per logged-in account (`codex`, or `codex1`, `codex2`, …) | — |
 | `grok` | xAI SuperGrok | `xai-oauth` (OAuth) | — |
 | `go` | OpenCode Go plan | `opencode-go` (api key) | `OPENCODE_API_KEY` |
 | `goog` | Google Antigravity (Gemini / Claude / GPT models) | `google-antigravity` (OAuth) | — |
@@ -52,6 +52,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 |---|---|
 | `glm 5h 8% (1h27m) wk 36% (2d18h)` | GLM rolling 5h window 8% used, resets in 1h27m; weekly window 36%, resets in 2d18h |
 | `codex wk 18% (4d12h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 18% used, resets in 4d12h; plus remaining credits |
+| `codex1 … wk 55% (2d22h) cr 2735 \| codex2 …` | Multiple ChatGPT accounts logged in: one segment each, numbered by credential age (oldest = 1), email shown in `/quota` |
 | `grok wk 10% (3d22h)` | SuperGrok weekly credits 10% used, resets in 3d22h |
 | `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
 | `goog 5h 1% (2h41m) wk 4% (5d20h)` | Google Antigravity 5h / weekly windows; the bar shows the tighter of its two pools (Gemini vs Claude/GPT), `/quota` lists both |
@@ -113,6 +114,7 @@ On `session_start` / `turn_start` the hook fetches (in parallel, TTL-cached) the
 | codex | `GET https://chatgpt.com/backend-api/wham/usage` |
 | grok | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` |
 | go | `GET https://opencode.ai/zen/go/v1/usage` |
+| goog | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` |
 
 OMP owns OAuth token refresh. When a token expires (e.g. xai access tokens are short-lived), the board keeps showing the last known values until OMP rotates the token the next time you actually use that provider. Network access goes through OMP's runtime (`fetch`), so the usual `HTTP(S)_PROXY` environment variables apply.
 
@@ -126,7 +128,7 @@ These endpoints are **undocumented** (reverse-engineered from the providers' web
 
 ## 中文速览
 
-OMP（Oh My Pi）单行配额状态栏：把 glm / codex / grok / opencode go 四家订阅的用量显示成一排，每轮对话自动刷新。
+OMP（Oh My Pi）单行配额状态栏：把 glm / codex / grok / opencode go / google antigravity 五家订阅的用量显示成一排，每轮对话自动刷新；同一服务登录多个账号时按 codex1 / codex2 分段显示。
 
 ```bash
 mkdir -p ~/.omp/agent/hooks/pre
