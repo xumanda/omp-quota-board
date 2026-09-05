@@ -44,7 +44,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | `codex` | ChatGPT Plus/Pro (Codex) | `openai-codex` (OAuth) — one segment per logged-in account (`codex`, or `codex1`, `codex2`, …) | — |
 | `grok` | xAI SuperGrok | `xai-oauth` (OAuth) | — |
 | `go` | OpenCode Go plan | `opencode-go` (api key) | `OPENCODE_API_KEY` |
-| `goog` | Google Antigravity (Gemini / Claude / GPT models) | `google-antigravity` (OAuth) | — |
+| `goog` | Google Antigravity (Gemini / Claude / GPT models) | `google-antigravity` (OAuth) — one segment per logged-in account (`goog`, or `goog1`, `goog2`, …) | — |
 
 ## Reading the bar
 
@@ -55,7 +55,7 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | `codex1 … wk 55% (2d22h) cr 2735 \| codex2 …` | Multiple ChatGPT accounts logged in: one segment each, numbered by credential age (oldest = 1), email shown in `/quota` |
 | `grok wk 10% (3d22h)` | SuperGrok weekly credits 10% used, resets in 3d22h |
 | `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
-| `goog 5h 1% (2h41m) wk 4% (5d20h)` | Google Antigravity 5h / weekly windows; the bar shows the tighter of its two pools (Gemini vs Claude/GPT), `/quota` lists both |
+| `goog 5h 1% (2h41m) wk 4% (5d20h)` | Google Antigravity 5h / weekly windows; multiple accounts shown as `goog1`, `goog2`, …; the bar shows the tighter of each account's two pools (Gemini vs Claude/GPT), `/quota` lists both |
 
 Every parenthesized duration is that window's reset countdown.
 
@@ -128,7 +128,7 @@ These endpoints are **undocumented** (reverse-engineered from the providers' web
 
 ## 中文速览
 
-OMP（Oh My Pi）单行配额状态栏：把 glm / codex / grok / opencode go / google antigravity 五家订阅的用量显示成一排，每轮对话自动刷新；同一服务登录多个账号时按 codex1 / codex2 分段显示。
+OMP（Oh My Pi）单行配额状态栏：把 glm / codex / grok / opencode go / google antigravity 五家订阅的用量显示成一排，每轮对话自动刷新；同一服务登录多个账号时按 codex1 / codex2、goog1 / goog2 分段显示。
 
 ```bash
 mkdir -p ~/.omp/agent/hooks/pre

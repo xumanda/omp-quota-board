@@ -530,7 +530,64 @@ export interface AgyState {
   fetchedAt: number;
 }
 
-let agyCache: AgyState | undefined;
+export interface AgyAccount {
+  key: string; // agent.db credential row id — stable anchor for cache & order
+  email?: string;
+  projectId?: string;
+  state: AgyState;
+}
+
+let agyAccounts: AgyAccount[] | undefined;
+
+interface AgyCred {
+  key: string;
+  access: string;
+  projectId: string;
+  email?: string;
+}
+
+/** All logged-in google-antigravity oauth rows, oldest credential first. */
+function readAgyCreds(): AgyCred[] {
+  const creds: AgyCred[] = [];
+  try {
+    const db = new Database(join(homedir(), ".omp", "agent", "agent.db"), {
+      readonly: true,
+    });
+    try {
+      db.run("PRAGMA busy_timeout = 2000");
+      const rows = db
+        .query(
+          "SELECT id, data FROM auth_credentials WHERE provider='google-antigravity' " +
+            "AND credential_type='oauth' AND disabled_cause IS NULL " +
+            "ORDER BY id ASC",
+        )
+        .all() as Array<{ id: number; data: string }>;
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.data) as Record<string, unknown>;
+          if (typeof parsed.access !== "string" || !parsed.access) continue;
+          if (typeof parsed.projectId !== "string" || !parsed.projectId) continue;
+          creds.push({
+            key: String(row.id),
+            access: parsed.access,
+            projectId: parsed.projectId,
+            email:
+              typeof parsed.email === "string" && parsed.email
+                ? parsed.email
+                : undefined,
+          });
+        } catch {
+          /* try next row */
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* fall through with whatever was parsed */
+  }
+  return creds;
+}
 
 function parseAgyWindow(raw: unknown): Win | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -548,64 +605,76 @@ function parseAgyWindow(raw: unknown): Win | undefined {
 export async function fetchAgy(
   force: boolean,
   log?: (...args: unknown[]) => void,
-): Promise<AgyState | undefined> {
+): Promise<AgyAccount[] | undefined> {
   if (!ENABLED) return undefined;
-  if (!force && agyCache && Date.now() - agyCache.fetchedAt < TTL_MS)
-    return agyCache;
-  const access = readCredential("google-antigravity", "oauth", "access");
-  const projectId = readCredential("google-antigravity", "oauth", "projectId");
-  if (!access || !projectId) {
+  const creds = readAgyCreds();
+  if (creds.length === 0) {
     log?.(
       "quota-board: no google-antigravity oauth access/projectId in agent.db; goog quota disabled",
     );
-    return agyCache;
+    return agyAccounts;
   }
-  try {
-    const payload = await fetchJson(
-      AGY_URL,
-      {
-        Authorization: `Bearer ${access}`,
-        "User-Agent": AGY_UA,
-        "x-activity-request-id": crypto.randomUUID(),
-      },
-      { method: "POST", body: JSON.stringify({ project: projectId }) },
-    );
-    const groups = payload.groups;
-    if (!Array.isArray(groups)) throw new Error("unexpected response shape");
-    const state: AgyState = { gemini: {}, thirdParty: {}, fetchedAt: Date.now() };
-    for (const group of groups as Array<Record<string, unknown>>) {
-      const name =
-        typeof group.displayName === "string" ? group.displayName.toLowerCase() : "";
-      const pool = name.includes("gemini")
-        ? state.gemini
-        : name.includes("claude") || name.includes("gpt")
-          ? state.thirdParty
-          : undefined;
-      if (!pool || !Array.isArray(group.buckets)) continue;
-      for (const bucket of group.buckets as Array<Record<string, unknown>>) {
-        const win = parseAgyWindow(bucket);
-        if (!win) continue;
-        const kind =
-          typeof bucket.window === "string"
-            ? bucket.window.toUpperCase().replace(/[\s-]+/g, "_")
-            : "";
-        if (kind === "WEEKLY" && !pool.weekly) pool.weekly = win;
-        else if ((kind === "FIVE_HOUR" || kind === "5H") && !pool.fiveHour)
-          pool.fiveHour = win;
+  const entries = await Promise.all(
+    creds.map(async (cred): Promise<AgyAccount | undefined> => {
+      const prev = agyAccounts?.find((e) => e.key === cred.key);
+      if (!force && prev && Date.now() - prev.state.fetchedAt < TTL_MS) return prev;
+      try {
+        const payload = await fetchJson(
+          AGY_URL,
+          {
+            Authorization: `Bearer ${cred.access}`,
+            "User-Agent": AGY_UA,
+            "x-activity-request-id": crypto.randomUUID(),
+          },
+          { method: "POST", body: JSON.stringify({ project: cred.projectId }) },
+        );
+        const groups = payload.groups;
+        if (!Array.isArray(groups)) throw new Error("unexpected response shape");
+        const state: AgyState = { gemini: {}, thirdParty: {}, fetchedAt: Date.now() };
+        for (const group of groups as Array<Record<string, unknown>>) {
+          const name =
+            typeof group.displayName === "string" ? group.displayName.toLowerCase() : "";
+          const pool = name.includes("gemini")
+            ? state.gemini
+            : name.includes("claude") || name.includes("gpt")
+              ? state.thirdParty
+              : undefined;
+          if (!pool || !Array.isArray(group.buckets)) continue;
+          for (const bucket of group.buckets as Array<Record<string, unknown>>) {
+            const win = parseAgyWindow(bucket);
+            if (!win) continue;
+            const kind =
+              typeof bucket.window === "string"
+                ? bucket.window.toUpperCase().replace(/[\s-]+/g, "_")
+                : "";
+            if (kind === "WEEKLY" && !pool.weekly) pool.weekly = win;
+            else if ((kind === "FIVE_HOUR" || kind === "5H") && !pool.fiveHour)
+              pool.fiveHour = win;
+          }
+        }
+        if (
+          !state.gemini.fiveHour &&
+          !state.gemini.weekly &&
+          !state.thirdParty.fiveHour &&
+          !state.thirdParty.weekly
+        )
+          throw new Error("no quota buckets parsed");
+        return {
+          key: cred.key,
+          email: cred.email,
+          projectId: cred.projectId,
+          state,
+        };
+      } catch (err) {
+        log?.(
+          `quota-board: goog(${cred.email ?? cred.key}) fetch failed: ${String(err)}`,
+        );
+        return prev; // stale on failure
       }
-    }
-    if (
-      !state.gemini.fiveHour &&
-      !state.gemini.weekly &&
-      !state.thirdParty.fiveHour &&
-      !state.thirdParty.weekly
-    )
-      throw new Error("no quota buckets parsed");
-    agyCache = state;
-  } catch (err) {
-    log?.(`quota-board: goog fetch failed: ${String(err)}`);
-  }
-  return agyCache; // stale on failure
+    }),
+  );
+  agyAccounts = entries.filter((e): e is AgyAccount => e !== undefined);
+  return agyAccounts;
 }
 
 function tighterWindow(a: Win | undefined, b: Win | undefined): Win | undefined {
@@ -614,7 +683,7 @@ function tighterWindow(a: Win | undefined, b: Win | undefined): Win | undefined 
   return (b.pct ?? 0) > (a.pct ?? 0) ? b : a;
 }
 
-export function agyText(s: AgyState): string | undefined {
+export function agyText(s: AgyState, label = "goog"): string | undefined {
   // Status bar shows the tighter of the two pools per window (early warning);
   // /quota lists both pools in full.
   const fiveHour = tighterWindow(s.gemini.fiveHour, s.thirdParty.fiveHour);
@@ -622,7 +691,7 @@ export function agyText(s: AgyState): string | undefined {
   if (!fiveHour && !weekly) return undefined;
   const parts: string[] = [];
   if (fiveHour) {
-    let text = `goog 5h ${fiveHour.pct}%`;
+    let text = `${label} 5h ${fiveHour.pct}%`;
     if (fiveHour.resetMs > 0)
       text += ` (${fmtDuration(fiveHour.resetMs - Date.now())})`;
     parts.push(text);
@@ -644,7 +713,7 @@ export default function quotaBoard(pi: HookAPI): void {
   const refreshStatus = async (ctx: {
     ui?: { setStatus?: (k: string, t: string) => void };
   }) => {
-    const [glm, codexSegs, grok, ocgo, agy] = await Promise.all([
+    const [glm, codexSegs, grok, ocgo, agySegs] = await Promise.all([
       fetchGlm(false, log).then((s) => s && glmText(s)),
       fetchCodex(false, log).then((accs) =>
         (accs ?? []).map((a, i) =>
@@ -653,9 +722,13 @@ export default function quotaBoard(pi: HookAPI): void {
       ),
       fetchGrok(false, log).then((s) => s && grokText(s)),
       fetchOcgo(false, log).then((s) => s && ocgoText(s)),
-      fetchAgy(false, log).then((s) => s && agyText(s)),
+      fetchAgy(false, log).then((accs) =>
+        (accs ?? []).map((a, i) =>
+          agyText(a.state, (accs?.length ?? 0) > 1 ? `goog${i + 1}` : "goog"),
+        ),
+      ),
     ]);
-    const segments = [glm, ...codexSegs, grok, ocgo, agy].filter(
+    const segments = [glm, ...codexSegs, grok, ocgo, ...(agySegs ?? [])].filter(
       (t): t is string => typeof t === "string",
     );
     if (segments.length > 0)
@@ -742,30 +815,35 @@ export default function quotaBoard(pi: HookAPI): void {
         } else {
           lines.push("  go   : unavailable (no api key or fetch failed)");
         }
-        if (agy) {
-          const bits: string[] = [];
-          for (const [pool, label] of [
-            [agy.gemini, "gemini"],
-            [agy.thirdParty, "claude/gpt"],
-          ] as const) {
-            const ws: string[] = [];
-            if (pool.fiveHour)
-              ws.push(
-                `5h ${pool.fiveHour.pct}%` +
-                  (pool.fiveHour.resetMs > 0
-                    ? ` (resets ${fmtLocal(pool.fiveHour.resetMs)})`
-                    : ""),
-              );
-            if (pool.weekly)
-              ws.push(
-                `wk ${pool.weekly.pct}%` +
-                  (pool.weekly.resetMs > 0
-                    ? ` (resets ${fmtLocal(pool.weekly.resetMs)})`
-                    : ""),
-              );
-            if (ws.length > 0) bits.push(`${label} ${ws.join(", ")}`);
-          }
-          lines.push(`  goog : ${bits.join(" | ") || "no windows"}`);
+        if (agy && agy.length > 0) {
+          agy.forEach((acc, i) => {
+            const label = agy.length > 1 ? `goog${i + 1}` : "goog";
+            const s = acc.state;
+            const who = acc.email ? ` <${acc.email}>` : "";
+            const bits: string[] = [];
+            for (const [pool, pLabel] of [
+              [s.gemini, "gemini"],
+              [s.thirdParty, "claude/gpt"],
+            ] as const) {
+              const ws: string[] = [];
+              if (pool.fiveHour)
+                ws.push(
+                  `5h ${pool.fiveHour.pct}%` +
+                    (pool.fiveHour.resetMs > 0
+                      ? ` (resets ${fmtLocal(pool.fiveHour.resetMs)})`
+                      : ""),
+                );
+              if (pool.weekly)
+                ws.push(
+                  `wk ${pool.weekly.pct}%` +
+                    (pool.weekly.resetMs > 0
+                      ? ` (resets ${fmtLocal(pool.weekly.resetMs)})`
+                      : ""),
+                );
+              if (ws.length > 0) bits.push(`${pLabel} ${ws.join(", ")}`);
+            }
+            lines.push(`  ${label}${who}: ${bits.join(" | ") || "no windows"}`);
+          });
         } else {
           lines.push(
             "  goog : unavailable (no oauth token in agent.db or fetch failed)",
