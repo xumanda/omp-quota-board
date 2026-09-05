@@ -711,7 +711,7 @@ export default function quotaBoard(pi: HookAPI): void {
   const log = (...args: unknown[]) => pi.logger?.warn?.(...(args as [string]));
 
   const refreshStatus = async (ctx: {
-    ui?: { setStatus?: (k: string, t: string) => void };
+    ui?: { setStatus?: (k: string, t: string | undefined) => void };
   }) => {
     const [glm, codexSegs, grok, ocgo, agySegs] = await Promise.all([
       fetchGlm(false, log).then((s) => s && glmText(s)),
@@ -728,11 +728,17 @@ export default function quotaBoard(pi: HookAPI): void {
         ),
       ),
     ]);
-    const segments = [glm, ...codexSegs, grok, ocgo, ...(agySegs ?? [])].filter(
-      (t): t is string => typeof t === "string",
-    );
-    if (segments.length > 0)
-      ctx.ui?.setStatus?.("quota-board", segments.join(" | "));
+    // Split into 2 rows so multiple accounts don't truncate on typical terminal widths:
+    // Row 1: glm | codex...
+    // Row 2: grok | goog... | go (ocgo)
+    const line1 = [glm, ...codexSegs].filter((t): t is string => typeof t === "string").join(" | ");
+    const line2 = [grok, ...(agySegs ?? []), ocgo].filter((t): t is string => typeof t === "string").join(" | ");
+
+    // Clear legacy single-row key if present
+    ctx.ui?.setStatus?.("quota-board", undefined);
+
+    ctx.ui?.setStatus?.("quota-board-1", line1 || undefined);
+    ctx.ui?.setStatus?.("quota-board-2", line2 || undefined);
   };
 
   pi.on("session_start", async (_event, ctx) => {
