@@ -4,13 +4,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * omp-quota-board — one-row quota status bar for Oh My Pi (OMP).
+ * omp-quota-board — two-row quota status bar for Oh My Pi (OMP).
  *
- * Renders a single status key ("quota-board") so the bar stays one row:
- *   glm 5h 4% (1h02m) wk 33% (26h) |
- *   codex1 5h 0% (5h00m) wk 55% (2d22h) cr 2735 | codex2 wk 8% (6d) |
- *   grok wk 7% (4d3h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d) |
- *   goog 5h 0% (4h42m) wk 0% (6d23h)
+ * Renders two status keys ("quota-board-1"/"quota-board-2") so long multi-account
+ * lines don't truncate on typical terminal widths:
+ *   row 1: 会话 3 轮 | codex1 5h 1% (2h56m) wk 16% (6d14h) cr 516 | codex2 wk 15% (6d14h)
+ *   row 2: glm 5h 4% (1h02m) wk 33% (26h) | grok wk 7% (4d3h) | goog 5h 0% (4h42m) wk 0% (6d23h) | go 5h 33% (1h28m) wk 17% (5d) mo 8% (12d)
  * Providers without credentials are silently skipped.
  *
  * Quota sources (read-only GETs, same endpoints the providers' own consoles
@@ -31,7 +30,7 @@ import { join } from "node:path";
  *   glm   : env ZAI_API_KEY | GLM_API_KEY, else agent.db 'zai' api_key .key
  *   codex : agent.db 'openai-codex' oauth rows (.access + .accountId header) —
  *           every logged-in account gets its own segment: "codex" when there
- *           is one, "codex1", "codex2", … by credential row id (oldest first)
+ *           is one, "codex1", "codex2", … by credential row id (newest first)
  *   grok  : agent.db 'xai-oauth' oauth .access
  *   go    : env OPENCODE_API_KEY, else agent.db 'opencode-go' api_key .key
  *   goog  : agent.db 'google-antigravity' oauth .access (+ .projectId body)
@@ -47,7 +46,8 @@ const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
 const GROK_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const OCGO_URL = "https://opencode.ai/zen/go/v1/usage";
 const AGY_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-const AGY_UA = "antigravity/cli/1.0.3 darwin/amd64";
+const AGY_UA =
+  "antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
 
 const TTL_MS = (() => {
   const v = Number(process.env.QUOTA_BOARD_TTL_MS);
@@ -255,7 +255,7 @@ interface CodexCred {
   email?: string;
 }
 
-/** All logged-in openai-codex oauth rows, oldest credential first. */
+/** All logged-in openai-codex oauth rows, newest credential first. */
 function readCodexCreds(): CodexCred[] {
   const creds: CodexCred[] = [];
   try {
@@ -268,7 +268,7 @@ function readCodexCreds(): CodexCred[] {
         .query(
           "SELECT id, data FROM auth_credentials WHERE provider='openai-codex' " +
             "AND credential_type='oauth' AND disabled_cause IS NULL " +
-            "ORDER BY id ASC",
+            "ORDER BY id DESC",
         )
         .all() as Array<{ id: number; data: string }>;
       for (const row of rows) {
@@ -364,7 +364,9 @@ export function codexText(s: CodexState, label = "codex"): string | undefined {
     parts.push(text);
   }
   if (parts.length === 0) return undefined;
-  if (s.creditsBalance) parts.push(`cr ${fmtCredits(s.creditsBalance)}`);
+  // A zero balance renders as "cr 0", which is pure noise on the bar; drop it.
+  const credits = s.creditsBalance ? fmtCredits(s.creditsBalance) : undefined;
+  if (credits && credits !== "0") parts.push(`cr ${credits}`);
   return parts.join(" ");
 }
 
@@ -707,9 +709,10 @@ export function agyText(s: AgyState, label = "goog"): string | undefined {
 
 // --- hook wiring -----------------------------------------------------------
 
+let sessionTurnCount = 0;
+
 export default function quotaBoard(pi: HookAPI): void {
   const log = (...args: unknown[]) => pi.logger?.warn?.(...(args as [string]));
-
   const refreshStatus = async (ctx: {
     ui?: { setStatus?: (k: string, t: string | undefined) => void };
   }) => {
@@ -729,10 +732,16 @@ export default function quotaBoard(pi: HookAPI): void {
       ),
     ]);
     // Split into 2 rows so multiple accounts don't truncate on typical terminal widths:
-    // Row 1: glm | codex...
-    // Row 2: grok | goog... | go (ocgo)
-    const line1 = [glm, ...codexSegs].filter((t): t is string => typeof t === "string").join(" | ");
-    const line2 = [grok, ...(agySegs ?? []), ocgo].filter((t): t is string => typeof t === "string").join(" | ");
+    // Row 1: turns | codex...
+    // Row 2: glm | grok | goog... | go (ocgo)
+    const turnText =
+      sessionTurnCount >= 60
+        ? `🚨 会话 ${sessionTurnCount} 轮`
+        : sessionTurnCount >= 40
+          ? `⚠️ 会话 ${sessionTurnCount} 轮`
+          : `会话 ${sessionTurnCount} 轮`;
+    const line1 = [turnText, ...codexSegs].filter((t): t is string => typeof t === "string").join(" | ");
+    const line2 = [glm, grok, ...(agySegs ?? []), ocgo].filter((t): t is string => typeof t === "string").join(" | ");
 
     // Clear legacy single-row key if present
     ctx.ui?.setStatus?.("quota-board", undefined);
@@ -742,10 +751,12 @@ export default function quotaBoard(pi: HookAPI): void {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    sessionTurnCount = 0;
     await refreshStatus(ctx);
   });
 
   pi.on("turn_start", async (_event, ctx) => {
+    sessionTurnCount++;
     await refreshStatus(ctx);
   });
 

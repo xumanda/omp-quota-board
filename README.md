@@ -3,8 +3,8 @@
 Two-row subscription quota status bar for [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) — shows **glm / codex / grok / google antigravity / opencode go** usage, refreshing automatically every turn.
 
 ```text
-glm 5h 32% (2h06m) wk 56% (3d20h) | codex1 5h 100% (2h20m) wk 16% (6d21h) cr 2151 | codex2 5h 0% (4h30m) wk 27% (5d19h) cr 0
-grok wk 19% (5d) | goog1 5h 26% (1h03m) wk 18% (5d11h) | goog2 5h 26% (1h03m) wk 18% (5d11h) | go 5h 0% (4h59m) wk 47% (1d13h) mo 54% (16d3h)
+会话 3 轮 | codex1 wk 15% (6d14h) | codex2 5h 1% (2h56m) wk 16% (6d14h) cr 516
+glm 5h 32% (2h06m) wk 56% (3d20h) | grok wk 19% (5d) | goog1 5h 26% (1h03m) wk 18% (5d11h) | go 5h 0% (4h59m) wk 47% (1d13h) mo 54% (16d3h)
 ```
 
 - **Single file, zero dependencies** — one TypeScript hook; OMP runs it on its bundled Bun runtime (`bun:sqlite` + `fetch`, nothing to install).
@@ -52,8 +52,8 @@ Log into any subset of the providers through OMP (the board detects whatever exi
 | Example | Meaning |
 |---|---|
 | `glm 5h 8% (1h27m) wk 36% (2d18h)` | GLM rolling 5h window 8% used, resets in 1h27m; weekly window 36%, resets in 2d18h |
-| `codex wk 18% (4d12h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 18% used, resets in 4d12h; plus remaining credits |
-| `codex1 … wk 55% (2d22h) cr 2735 \| codex2 …` | Multiple ChatGPT accounts logged in: one segment each, numbered by credential age (oldest = 1), email shown in `/quota` |
+| `codex wk 18% (4d12h) cr 3000` | ChatGPT rate-limit window (kind derived per plan — Plus is weekly) 18% used, resets in 4d12h; plus remaining credits (`cr` is omitted when the balance is 0) |
+| `codex1 … wk 55% (2d22h) cr 2735 \| codex2 …` | Multiple ChatGPT accounts logged in: one segment each, numbered by credential age (newest = 1), email shown in `/quota` |
 | `grok wk 10% (3d22h)` | SuperGrok weekly credits 10% used, resets in 3d22h |
 | `go 5h 3% (1h35m) wk 18% (11h58m) mo 9% (29d1h)` | OpenCode Go rolling / weekly / monthly windows, each with its reset countdown |
 | `goog 5h 1% (2h41m) wk 4% (5d20h)` | Google Antigravity 5h / weekly windows; multiple accounts shown as `goog1`, `goog2`, …; the bar shows the tighter of each account's two pools (Gemini vs Claude/GPT), `/quota` lists both |
@@ -129,7 +129,7 @@ These endpoints are **undocumented** (reverse-engineered from the providers' web
 
 ## 中文速览
 
-OMP（Oh My Pi）双行配额状态栏：把 glm / codex / grok / google antigravity / opencode go 五家订阅的用量按两行清爽显示（第一行 GLM + Codex，第二行 Grok + Google + OpenCode Go），每轮对话自动刷新；同一服务登录多个账号时按 codex1 / codex2、goog1 / goog2 分段显示，彻底解决单行超长在终端被截断的问题。
+OMP（Oh My Pi）双行配额状态栏：把 glm / codex / grok / google antigravity / opencode go 五家订阅的用量按两行清爽显示（第一行 Codex，第二行 GLM + Grok + Google + OpenCode Go），每轮对话自动刷新；同一服务登录多个账号时按 codex1 / codex2、goog1 / goog2 分段显示，彻底解决单行超长在终端被截断的问题。
 
 ```bash
 mkdir -p ~/.omp/agent/hooks/pre
