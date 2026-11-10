@@ -20,6 +20,9 @@ import { join } from "node:path";
  *            18000=5h, 604800=wk, 2628000=mo)
  *   grok  : GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
  *   go    : GET https://opencode.ai/zen/go/v1/usage
+ *   devin : POST https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus
+ *           (Connect RPC, JSON codec; endpoint reverse-engineered from OMP's
+ *            bundled client — api.devin.ai does not route it)
  *
  * Credentials are read at runtime from OMP's own store
  * (~/.omp/agent/agent.db, auth_credentials, disabled_cause IS NULL, newest
@@ -30,6 +33,7 @@ import { join } from "node:path";
  *           is one, "codex1", "codex2", … by credential row id (newest first)
  *   grok  : agent.db 'xai-oauth' oauth .access
  *   go    : env OPENCODE_API_KEY, else agent.db 'opencode-go' api_key .key
+ *   devin : agent.db 'devin' oauth .access
  * OMP owns OAuth refresh; when a token expires this hook serves the last
  * known values until OMP rotates it.
  *
@@ -512,6 +516,168 @@ export function ocgoText(s: OcgoState): string | undefined {
   return parts.join(" ");
 }
 
+// --- devin ------------------------------------------------------------------
+// Devin (Cognition) quota via Connect RPC (JSON codec). The endpoint is
+// undocumented: reverse-engineered from OMP's own bundled client
+// (GetUserStatus on the seat-management service). It is served from
+// Codeium's server; api.devin.ai does not route it (404).
+
+const DEVIN_ROUTE = "/exa.seat_management_pb.SeatManagementService/GetUserStatus";
+const DEVIN_BASE = "https://server.codeium.com";
+
+interface DevinState {
+  daily?: Win;
+  weekly?: Win;
+  planName?: string;
+  fetchedAt: number;
+}
+
+export interface DevinAccount {
+  key: string; // agent.db credential row id — stable anchor for cache & order
+  email?: string;
+  state: DevinState;
+}
+
+let devinAccounts: DevinAccount[] | undefined;
+
+/** All logged-in devin oauth rows, newest credential first. */
+function readDevinCreds(): Array<{ key: string; access: string }> {
+  const creds: Array<{ key: string; access: string }> = [];
+  try {
+    const db = new Database(join(homedir(), ".omp", "agent", "agent.db"), {
+      readonly: true,
+    });
+    try {
+      db.run("PRAGMA busy_timeout = 2000");
+      const rows = db
+        .query(
+          "SELECT id, data FROM auth_credentials WHERE provider='devin' " +
+            "AND credential_type='oauth' AND disabled_cause IS NULL " +
+            "ORDER BY id DESC",
+        )
+        .all() as Array<{ id: number; data: string }>;
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.data) as Record<string, unknown>;
+          if (typeof parsed.access !== "string" || !parsed.access) continue;
+          creds.push({ key: String(row.id), access: parsed.access });
+        } catch {
+          /* try next row */
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* fall through with whatever was parsed */
+  }
+  return creds;
+}
+
+/** The seat-management API authenticates through metadata.apiKey; upstream
+ * wraps bare three-part session tokens in a literal marker prefix. */
+function devinSessionToken(access: string): string {
+  const t = access.trim();
+  if (t.startsWith("devin-session-token$")) return t;
+  return t.split(".").length === 3 ? `devin-session-token$${t}` : t;
+}
+
+export async function fetchDevin(
+  force: boolean,
+  log?: (...args: unknown[]) => void,
+): Promise<DevinAccount[] | undefined> {
+  if (!ENABLED) return undefined;
+  const creds = readDevinCreds();
+  if (creds.length === 0) {
+    log?.("quota-board: no devin oauth access in agent.db; devin quota disabled");
+    return devinAccounts;
+  }
+  const entries = await Promise.all(
+    creds.map(async (cred): Promise<DevinAccount | undefined> => {
+      const prev = devinAccounts?.find((e) => e.key === cred.key);
+      if (!force && prev && Date.now() - prev.state.fetchedAt < TTL_MS) return prev;
+      try {
+        const payload = await fetchJson(
+          DEVIN_BASE + DEVIN_ROUTE,
+          {
+            "content-type": "application/json",
+            "connect-protocol-version": "1",
+          },
+          {
+            method: "POST",
+            body: JSON.stringify({
+              metadata: {
+                apiKey: devinSessionToken(cred.access),
+                ideName: "devin-cli",
+                ideType: "chisel",
+                ideVersion: "3000.11.205",
+                extensionName: "chisel",
+                extensionVersion: "3000.11.205",
+                locale: "en",
+                os:
+                  process.platform === "darwin"
+                    ? "darwin"
+                    : process.platform === "win32"
+                      ? "windows"
+                      : "linux",
+              },
+            }),
+          },
+        );
+        // GetUserStatusResponse as proto3 JSON (camelCase field names);
+        // planInfo may sit at the top level or inside planStatus.
+        const userStatus = (payload.userStatus ?? {}) as Record<string, unknown>;
+        const planStatus = (userStatus.planStatus ?? {}) as Record<string, unknown>;
+        const planInfo = (payload.planInfo ??
+          planStatus.planInfo ??
+          {}) as Record<string, unknown>;
+        const email =
+          typeof userStatus.email === "string" ? userStatus.email : undefined;
+        const planName =
+          typeof planInfo.planName === "string" ? planInfo.planName : undefined;
+        const dailyRem = planStatus.dailyQuotaRemainingPercent;
+        const weeklyRem = planStatus.weeklyQuotaRemainingPercent;
+        if (dailyRem === undefined && weeklyRem === undefined)
+          throw new Error("no quota fields in response");
+        // The bar reports used percent; the API reports remaining percent.
+        // int64 reset timestamps may arrive as numbers or strings.
+        const state: DevinState = { fetchedAt: Date.now(), planName };
+        if (dailyRem !== undefined)
+          state.daily = {
+            pct: Math.max(0, 100 - Number(dailyRem)),
+            resetMs: Number(planStatus.dailyQuotaResetAtUnix ?? 0) * 1000,
+          };
+        if (weeklyRem !== undefined)
+          state.weekly = {
+            pct: Math.max(0, 100 - Number(weeklyRem)),
+            resetMs: Number(planStatus.weeklyQuotaResetAtUnix ?? 0) * 1000,
+          };
+        return { key: cred.key, email, state };
+      } catch (err) {
+        log?.(`quota-board: devin(${cred.key}) fetch failed: ${String(err)}`);
+        return prev; // stale on failure
+      }
+    }),
+  );
+  devinAccounts = entries.filter((e): e is DevinAccount => e !== undefined);
+  return devinAccounts;
+}
+
+export function devinText(s: DevinState, label = "devin"): string | undefined {
+  const parts: string[] = [];
+  for (const [win, wLabel] of [
+    [s.daily, "day"],
+    [s.weekly, "wk"],
+  ] as const) {
+    if (!win || win.pct === undefined) continue;
+    let text = `${wLabel} ${win.pct}%`;
+    if (win.resetMs > 0) text += ` (${fmtDuration(win.resetMs - Date.now())})`;
+    parts.push(text);
+  }
+  if (parts.length === 0) return undefined;
+  return `${label} ${parts.join(" ")}`;
+}
+
 // --- hook wiring -----------------------------------------------------------
 
 let sessionTurnCount = 0;
@@ -521,7 +687,7 @@ export default function quotaBoard(pi: HookAPI): void {
   const refreshStatus = async (ctx: {
     ui?: { setStatus?: (k: string, t: string | undefined) => void };
   }) => {
-    const [glm, codexSegs, grok, ocgo] = await Promise.all([
+    const [glm, codexSegs, grok, ocgo, devinSegs] = await Promise.all([
       fetchGlm(false, log).then((s) => s && glmText(s)),
       fetchCodex(false, log).then((accs) =>
         (accs ?? []).map((a, i) =>
@@ -530,10 +696,15 @@ export default function quotaBoard(pi: HookAPI): void {
       ),
       fetchGrok(false, log).then((s) => s && grokText(s)),
       fetchOcgo(false, log).then((s) => s && ocgoText(s)),
+      fetchDevin(false, log).then((accs) =>
+        (accs ?? []).map((a, i) =>
+          devinText(a.state, (accs?.length ?? 0) > 1 ? `devin${i + 1}` : "devin"),
+        ),
+      ),
     ]);
     // Split into 2 rows so multiple accounts don't truncate on typical terminal widths:
     // Row 1: turns | codex...
-    // Row 2: glm | grok | go (ocgo)
+    // Row 2: glm | grok | devin | go (ocgo)
     const turnText =
       sessionTurnCount >= 60
         ? `🚨 会话 ${sessionTurnCount} 轮`
@@ -541,7 +712,7 @@ export default function quotaBoard(pi: HookAPI): void {
           ? `⚠️ 会话 ${sessionTurnCount} 轮`
           : `会话 ${sessionTurnCount} 轮`;
     const line1 = [turnText, ...codexSegs].filter((t): t is string => typeof t === "string").join(" | ");
-    const line2 = [glm, grok, ocgo].filter((t): t is string => typeof t === "string").join(" | ");
+    const line2 = [glm, grok, ...(devinSegs ?? []), ocgo].filter((t): t is string => typeof t === "string").join(" | ");
 
     // Clear legacy single-row key if present
     ctx.ui?.setStatus?.("quota-board", undefined);
@@ -562,16 +733,17 @@ export default function quotaBoard(pi: HookAPI): void {
 
   try {
     pi.registerCommand("quota", {
-      description: "GLM / Codex / Grok / OpenCode Go quota report",
+      description: "GLM / Codex / Grok / OpenCode Go / Devin quota report",
       handler: async (_args, ctx) => {
-        const [glm, codex, grok, ocgo] = await Promise.all([
+        const [glm, codex, grok, ocgo, devin] = await Promise.all([
           fetchGlm(true, log),
           fetchCodex(true, log),
           fetchGrok(true, log),
           fetchOcgo(true, log),
+          fetchDevin(true, log),
         ]);
         const lines: string[] = [
-          "Quota board (glm / codex / grok / opencode go)",
+          "Quota board (glm / codex / grok / opencode go / devin)",
         ];
         if (glm) {
           const bits: string[] = [];
@@ -630,6 +802,29 @@ export default function quotaBoard(pi: HookAPI): void {
           lines.push(`  go   : ${bits.join(" | ") || "no windows"}`);
         } else {
           lines.push("  go   : unavailable (no api key or fetch failed)");
+        }
+        if (devin && devin.length > 0) {
+          devin.forEach((acc, i) => {
+            const label = devin.length > 1 ? `devin${i + 1}` : "devin";
+            const s = acc.state;
+            const who = acc.email ? ` <${acc.email}>` : "";
+            const bits: string[] = [];
+            if (s.daily)
+              bits.push(
+                `day ${s.daily.pct ?? "?"}%` +
+                  (s.daily.resetMs > 0
+                    ? ` (resets ${fmtLocal(s.daily.resetMs)})`
+                    : ""),
+              );
+            if (s.weekly) bits.push(`wk ${s.weekly.pct}%`);
+            lines.push(
+              `  ${label}${s.planName ? ` (${s.planName})` : ""}${who}: ${bits.join(" | ") || "no windows"}`,
+            );
+          });
+        } else {
+          lines.push(
+            "  devin: unavailable (no oauth token in agent.db or fetch failed)",
+          );
         }
         lines.push(
           `  knobs: ttl=${Math.round(TTL_MS / 1000)}s (QUOTA_BOARD_TTL_MS, QUOTA_BOARD)`,
